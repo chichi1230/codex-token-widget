@@ -1,0 +1,8 @@
+{
+  "sessionsRootPath": "~/.codex/sessions",
+  "refreshSeconds": 20,
+  "alwaysOnTop": true,
+  "opacity": 0.98,
+  "windowX": null,
+  "windowY": null
+}
