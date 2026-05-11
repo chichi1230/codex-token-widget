@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 struct WidgetConfig: Decodable {
@@ -18,6 +19,8 @@ struct RateWindow {
 }
 
 struct RateLimitSnapshot {
+    let limitID: String
+    let limitName: String?
     let planType: String
     let primary: RateWindow
     let secondary: RateWindow
@@ -36,6 +39,7 @@ final class CodexRateLimitReader {
     private let config: WidgetConfig
     private let resetTimeFormatter: DateFormatter
     private let resetDateFormatter: DateFormatter
+    private let maxScanBytes: UInt64 = 64_000_000
 
     init(config: WidgetConfig) {
         self.config = config
@@ -62,19 +66,44 @@ final class CodexRateLimitReader {
         }
 
         let age = max(0, Int(Date().timeIntervalSince(snapshot.capturedAt)))
+        let source = snapshot.limitName ?? (snapshot.limitID == "codex" ? "CODEX" : snapshot.limitID)
         return WidgetMetrics(
             title: "CODEX LIMITS",
             primary: snapshot.primary,
             secondary: snapshot.secondary,
-            status: "\(snapshot.planType.uppercased())  ·  updated \(formatAge(age)) ago"
+            status: "\(snapshot.planType.uppercased())  ·  \(source)  ·  updated \(formatAge(age)) ago"
         )
     }
 
     private func readLatestSnapshot() -> RateLimitSnapshot? {
-        recentSessionFiles()
-            .prefix(50)
-            .compactMap { readSnapshot(from: $0) }
-            .max { $0.capturedAt < $1.capturedAt }
+        var globalSnapshots: [RateLimitSnapshot] = []
+        var scopedSnapshots: [RateLimitSnapshot] = []
+        let now = Date()
+
+        for file in recentSessionFiles().prefix(75) {
+            for snapshot in readSnapshots(from: file) {
+                if snapshot.limitID == "codex" {
+                    globalSnapshots.append(snapshot)
+                } else {
+                    scopedSnapshots.append(snapshot)
+                }
+            }
+
+            if let latestGlobal = globalSnapshots.max(by: { $0.capturedAt < $1.capturedAt }),
+               now.timeIntervalSince(latestGlobal.capturedAt) <= 15 * 60 {
+                break
+            }
+        }
+
+        let latestGlobal = globalSnapshots.max { $0.capturedAt < $1.capturedAt }
+        let latestScoped = scopedSnapshots.max { $0.capturedAt < $1.capturedAt }
+
+        if let latestGlobal, let latestScoped,
+           latestScoped.capturedAt.timeIntervalSince(latestGlobal.capturedAt) > 15 * 60 {
+            return latestScoped
+        }
+
+        return latestGlobal ?? latestScoped
     }
 
     private func recentSessionFiles() -> [URL] {
@@ -93,8 +122,11 @@ final class CodexRateLimitReader {
         return files.sorted { $0.modified > $1.modified }.map(\.url)
     }
 
-    private func readSnapshot(from file: URL) -> RateLimitSnapshot? {
-        guard let text = tail(file: file, maxBytes: 8_000_000) else { return nil }
+    private func readSnapshots(from file: URL) -> [RateLimitSnapshot] {
+        guard let text = tail(file: file, maxBytes: maxScanBytes) else { return [] }
+        var latestGlobal: RateLimitSnapshot?
+        var latestScoped: RateLimitSnapshot?
+
         for line in text.components(separatedBy: .newlines).reversed() {
             guard line.contains("\"rate_limits\""),
                   let data = line.data(using: .utf8),
@@ -105,9 +137,19 @@ final class CodexRateLimitReader {
                   let rateLimits = payload["rate_limits"] as? [String: Any],
                   let snapshot = snapshot(from: rateLimits, timestamp: object["timestamp"] as? String)
             else { continue }
-            return snapshot
+
+            if snapshot.limitID == "codex" {
+                latestGlobal = latestGlobal ?? snapshot
+            } else {
+                latestScoped = latestScoped ?? snapshot
+            }
+
+            if latestGlobal != nil && latestScoped != nil {
+                break
+            }
         }
-        return nil
+
+        return [latestGlobal, latestScoped].compactMap { $0 }
     }
 
     private func tail(file: URL, maxBytes: UInt64) -> String? {
@@ -121,7 +163,8 @@ final class CodexRateLimitReader {
     }
 
     private func snapshot(from rateLimits: [String: Any], timestamp: String?) -> RateLimitSnapshot? {
-        if let limitID = rateLimits["limit_id"] as? String, limitID != "codex" {
+        let limitID = (rateLimits["limit_id"] as? String) ?? "codex"
+        if limitID != "codex" && !limitID.hasPrefix("codex_") {
             return nil
         }
 
@@ -131,9 +174,17 @@ final class CodexRateLimitReader {
               let secondary = parseWindow(secondaryJSON)
         else { return nil }
 
+        let limitName = rateLimits["limit_name"] as? String
         let planType = (rateLimits["plan_type"] as? String) ?? "unknown"
         let capturedAt = parseTimestamp(timestamp) ?? Date()
-        return RateLimitSnapshot(planType: planType, primary: primary, secondary: secondary, capturedAt: capturedAt)
+        return RateLimitSnapshot(
+            limitID: limitID,
+            limitName: limitName,
+            planType: planType,
+            primary: primary,
+            secondary: secondary,
+            capturedAt: capturedAt
+        )
     }
 
     private func parseWindow(_ json: [String: Any]) -> RateWindow? {
@@ -143,7 +194,8 @@ final class CodexRateLimitReader {
         else { return nil }
 
         let remaining = max(0, min(100, Int((100.0 - usedPercent).rounded())))
-        let resetDate = Date(timeIntervalSince1970: resetAt)
+        let resetSeconds = resetAt > 10_000_000_000 ? resetAt / 1000 : resetAt
+        let resetDate = Date(timeIntervalSince1970: resetSeconds)
         return RateWindow(
             name: windowName(Int(windowMinutes)),
             remainingPercent: remaining,
@@ -181,6 +233,7 @@ final class CodexRateLimitReader {
         if let value = value as? Double { return value }
         if let value = value as? Int { return Double(value) }
         if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String { return Double(value) }
         return nil
     }
 
@@ -189,6 +242,24 @@ final class CodexRateLimitReader {
         if path.hasPrefix("~/") { return home + String(path.dropFirst()) }
         return path
     }
+}
+
+private func loadWidgetConfig() -> WidgetConfig {
+    let path = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("codex-token-widget/config.json")
+    guard let data = try? Data(contentsOf: path),
+          let config = try? JSONDecoder().decode(WidgetConfig.self, from: data)
+    else {
+        return WidgetConfig(
+            sessionsRootPath: nil,
+            refreshSeconds: 20,
+            alwaysOnTop: true,
+            opacity: 0.98,
+            windowX: nil,
+            windowY: nil
+        )
+    }
+    return config
 }
 
 final class PixelBar: NSView {
@@ -373,7 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        config = loadConfig()
+        config = loadWidgetConfig()
         reader = CodexRateLimitReader(config: config)
 
         let frame = initialFrame(config)
@@ -412,23 +483,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSRect(origin: NSPoint(x: x, y: y), size: size)
     }
 
-    private func loadConfig() -> WidgetConfig {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("codex-token-widget/config.json")
-        guard let data = try? Data(contentsOf: path),
-              let config = try? JSONDecoder().decode(WidgetConfig.self, from: data)
-        else {
-            return WidgetConfig(
-                sessionsRootPath: nil,
-                refreshSeconds: 20,
-                alwaysOnTop: true,
-                opacity: 0.98,
-                windowX: nil,
-                windowY: nil
-            )
-        }
-        return config
-    }
 }
 
 private func formatAge(_ seconds: Int) -> String {
@@ -438,6 +492,19 @@ private func formatAge(_ seconds: Int) -> String {
     let hours = minutes / 60
     if hours < 24 { return "\(hours)h" }
     return "\(hours / 24)d"
+}
+
+if CommandLine.arguments.contains("--print") {
+    let metrics = CodexRateLimitReader(config: loadWidgetConfig()).metrics()
+    print("\(metrics.title)")
+    if let primary = metrics.primary {
+        print("\(primary.name): \(primary.remainingPercent)% remaining, resets \(primary.resetText)")
+    }
+    if let secondary = metrics.secondary {
+        print("\(secondary.name): \(secondary.remainingPercent)% remaining, resets \(secondary.resetText)")
+    }
+    print(metrics.status)
+    Darwin.exit(0)
 }
 
 let app = NSApplication.shared

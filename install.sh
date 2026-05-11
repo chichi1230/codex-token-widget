@@ -5,6 +5,8 @@ ROOT="$HOME/codex-token-widget"
 APP="$ROOT/build/CodexTokenWidget.app"
 BIN="$APP/Contents/MacOS/CodexTokenWidget"
 PLIST="$HOME/Library/LaunchAgents/local.codex-token-widget.plist"
+DOMAIN="gui/$(id -u)"
+LABEL="local.codex-token-widget"
 
 mkdir -p "$APP/Contents/MacOS"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
@@ -35,6 +37,7 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load "$PLIST"
+launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || true
+launchctl kickstart "$DOMAIN/$LABEL" 2>/dev/null || launchctl load "$PLIST"
 echo "Installed: $APP"

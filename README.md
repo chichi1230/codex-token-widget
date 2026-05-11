@@ -39,8 +39,10 @@ After changing Swift or config:
 ```zsh
 cd ~/codex-token-widget
 swiftc CodexTokenWidget.swift -o build/CodexTokenWidget.app/Contents/MacOS/CodexTokenWidget -framework AppKit
+build/CodexTokenWidget.app/Contents/MacOS/CodexTokenWidget --print
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.codex-token-widget.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.codex-token-widget.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.codex-token-widget.plist 2>/dev/null || true
+launchctl kickstart gui/$(id -u)/local.codex-token-widget 2>/dev/null || launchctl load ~/Library/LaunchAgents/local.codex-token-widget.plist
 ```
 
 Check errors:
