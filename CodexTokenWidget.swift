@@ -71,12 +71,10 @@ final class CodexRateLimitReader {
     }
 
     private func readLatestSnapshot() -> RateLimitSnapshot? {
-        for file in recentSessionFiles().prefix(20) {
-            if let snapshot = readSnapshot(from: file) {
-                return snapshot
-            }
-        }
-        return nil
+        recentSessionFiles()
+            .prefix(50)
+            .compactMap { readSnapshot(from: $0) }
+            .max { $0.capturedAt < $1.capturedAt }
     }
 
     private func recentSessionFiles() -> [URL] {
@@ -123,6 +121,10 @@ final class CodexRateLimitReader {
     }
 
     private func snapshot(from rateLimits: [String: Any], timestamp: String?) -> RateLimitSnapshot? {
+        if let limitID = rateLimits["limit_id"] as? String, limitID != "codex" {
+            return nil
+        }
+
         guard let primaryJSON = rateLimits["primary"] as? [String: Any],
               let secondaryJSON = rateLimits["secondary"] as? [String: Any],
               let primary = parseWindow(primaryJSON),
@@ -167,6 +169,11 @@ final class CodexRateLimitReader {
         guard let value else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date
+        }
+
+        formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: value)
     }
 
@@ -205,7 +212,7 @@ final class PixelBar: NSView {
         let gap: CGFloat = 2
         let totalGap = CGFloat(segments - 1) * gap
         let segmentWidth = floor((bounds.width - totalGap) / CGFloat(segments))
-        let filled = Int((fraction * Double(segments)).rounded(.toNearestOrAwayFromZero))
+        let filled = fraction >= 1.0 ? segments : Int(floor(fraction * Double(segments)))
 
         for index in 0..<segments {
             let x = CGFloat(index) * (segmentWidth + gap)
