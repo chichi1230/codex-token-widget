@@ -76,34 +76,21 @@ final class CodexRateLimitReader {
     }
 
     private func readLatestSnapshot() -> RateLimitSnapshot? {
-        var globalSnapshots: [RateLimitSnapshot] = []
-        var scopedSnapshots: [RateLimitSnapshot] = []
+        var snapshots: [RateLimitSnapshot] = []
         let now = Date()
 
         for file in recentSessionFiles().prefix(75) {
             for snapshot in readSnapshots(from: file) {
-                if snapshot.limitID == "codex" {
-                    globalSnapshots.append(snapshot)
-                } else {
-                    scopedSnapshots.append(snapshot)
-                }
+                snapshots.append(snapshot)
             }
 
-            if let latestGlobal = globalSnapshots.max(by: { $0.capturedAt < $1.capturedAt }),
-               now.timeIntervalSince(latestGlobal.capturedAt) <= 15 * 60 {
+            if let latest = snapshots.max(by: { $0.capturedAt < $1.capturedAt }),
+               now.timeIntervalSince(latest.capturedAt) <= 15 * 60 {
                 break
             }
         }
 
-        let latestGlobal = globalSnapshots.max { $0.capturedAt < $1.capturedAt }
-        let latestScoped = scopedSnapshots.max { $0.capturedAt < $1.capturedAt }
-
-        if let latestGlobal, let latestScoped,
-           latestScoped.capturedAt.timeIntervalSince(latestGlobal.capturedAt) > 15 * 60 {
-            return latestScoped
-        }
-
-        return latestGlobal ?? latestScoped
+        return snapshots.max { $0.capturedAt < $1.capturedAt }
     }
 
     private func recentSessionFiles() -> [URL] {
@@ -124,8 +111,7 @@ final class CodexRateLimitReader {
 
     private func readSnapshots(from file: URL) -> [RateLimitSnapshot] {
         guard let text = tail(file: file, maxBytes: maxScanBytes) else { return [] }
-        var latestGlobal: RateLimitSnapshot?
-        var latestScoped: RateLimitSnapshot?
+        var latest: RateLimitSnapshot?
 
         for line in text.components(separatedBy: .newlines).reversed() {
             guard line.contains("\"rate_limits\""),
@@ -138,18 +124,11 @@ final class CodexRateLimitReader {
                   let snapshot = snapshot(from: rateLimits, timestamp: object["timestamp"] as? String)
             else { continue }
 
-            if snapshot.limitID == "codex" {
-                latestGlobal = latestGlobal ?? snapshot
-            } else {
-                latestScoped = latestScoped ?? snapshot
-            }
-
-            if latestGlobal != nil && latestScoped != nil {
-                break
-            }
+            latest = snapshot
+            break
         }
 
-        return [latestGlobal, latestScoped].compactMap { $0 }
+        return [latest].compactMap { $0 }
     }
 
     private func tail(file: URL, maxBytes: UInt64) -> String? {
@@ -164,9 +143,7 @@ final class CodexRateLimitReader {
 
     private func snapshot(from rateLimits: [String: Any], timestamp: String?) -> RateLimitSnapshot? {
         let limitID = (rateLimits["limit_id"] as? String) ?? "codex"
-        if limitID != "codex" && !limitID.hasPrefix("codex_") {
-            return nil
-        }
+        guard limitID == "codex" else { return nil }
 
         guard let primaryJSON = rateLimits["primary"] as? [String: Any],
               let secondaryJSON = rateLimits["secondary"] as? [String: Any],
